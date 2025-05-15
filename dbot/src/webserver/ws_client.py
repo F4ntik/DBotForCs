@@ -88,6 +88,7 @@ def check_api_key(request):
 
 # -- handle_message
 async def handle_message(data: dict):
+  import asyncio
 
   cs_message = data['message']
   nick = data['nick']
@@ -98,16 +99,41 @@ async def handle_message(data: dict):
   if not (cs_message and nick and team is not None ):
     return
   
-  discord_id: int = await nsroute.call_route("/CheckSteam", steam_id=steam_id)
+  # Логируем получение сообщения из CS
+  logger.info(f"Получено сообщение из CS: {nick}: {cs_message[:30]}...")
+  
+  # Получаем Discord ID с использованием кеша и таймаута
   prefix = ""
-
-  if discord_id:
-    member = await nsroute.call_route("/GetMember", discord_id=discord_id)
-    if member:
-      prefix = f"[{member.display_name}] "
-
+  try:
+    # Таймаут 1 секунда для запроса к базе
+    discord_id = await asyncio.wait_for(nsroute.call_route("/CheckSteam", steam_id=steam_id), timeout=1.0)
+    
+    if discord_id:
+      # Если нашелся Discord ID, получаем данные о пользователе
+      try:
+        # Таймаут 1 секунда для получения Member
+        member = await asyncio.wait_for(
+          nsroute.call_route("/GetMember", discord_id=discord_id),
+          timeout=1.0
+        )
+        if member:
+          prefix = f"[{member.display_name}] "
+      except asyncio.TimeoutError:
+        # Если не смогли получить данные о мембере, используем хотя бы Discord ID
+        prefix = f"[ID:{discord_id}] "
+      except Exception as e:
+        logger.error(f"Ошибка при получении данных о пользователе Discord: {e}")
+  except asyncio.TimeoutError:
+    logger.error(f"Таймаут при получении Discord ID для Steam ID {steam_id}")
+    # Даже при таймауте пытаемся отправить осмысленное сообщение
+    if team is not None:
+      prefix = f"({team.upper() if team else 'SPEC'}) "
+  except Exception as e:
+    logger.error(f"Ошибка при получении данных пользователя: {e}")
+  
+  # Отправляем сообщение в любом случае, даже если не смогли получить префикс
   formatted_message = format_message(nick, cs_message, team, prefix + channel_prefix)
-
+  
   await observer.notify(Event.WBH_MESSAGE, {
     "message": formatted_message
   })
