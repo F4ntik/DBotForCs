@@ -78,9 +78,12 @@ class Observer:
       **kwargs: Ключевые аргументы, которые будут переданы в функции обратного вызова.
     """
     if event.value in self._subscribers:
+      tasks = []
       for callback in self._subscribers[event.value]:
-        # await asyncio.sleep(0)  # Позволяет другим задачам выполняться
-        await callback(*args, **kwargs)
+        tasks.append(asyncio.create_task(callback(*args, **kwargs)))
+      if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+
 
 # !SECTION
 
