@@ -3,6 +3,9 @@ from data_server.asyncsql import AioMysql, QueryError, ConnectionError as aioCon
 
 import discord
 import re
+import asyncio
+from datetime import datetime, timedelta
+from typing import Dict, List, Tuple, Optional, Any
 
 import config
 
@@ -11,6 +14,20 @@ mysql: AioMysql = AioMysql(host=config.DB_HOST,
                            user=config.DB_USER,
                            password=config.DB_PASSWORD,
                            db=config.DB_NAME)
+
+# Кеши для хранения данных
+steam_discord_cache: Dict[str, int] = {}
+discord_steam_cache: Dict[int, str] = {}
+map_list_cache: List[Tuple[str, int]] = []
+
+# Метаданные для кешей
+cache_last_update = {
+    "steam_discord": datetime.min,
+    "map_list": datetime.min
+}
+
+# Интервалы обновления кешей (в секундах)
+CACHE_UPDATE_INTERVAL = 300  # 5 минут
 
 # SECTION Utility
 
@@ -78,8 +95,107 @@ async def ev_ready():
   try:
     await mysql.connect()
     logger.info("MySQL: Успешно подключен")
+    # Запускаем мониторинг соединения с MySQL
+    asyncio.create_task(monitor_mysql_connection())
+    # Запускаем задачу обновления кешей
+    asyncio.create_task(update_cache_task())
   except aioConnectionError as err:
     logger.error(f"MySQL: {err}")
+    # Даже в случае ошибки запускаем мониторинг - он попытается переподключиться
+    asyncio.create_task(monitor_mysql_connection())
+    # Также запускаем задачу кеширования - она будет пытаться работать, когда соединение появится
+    asyncio.create_task(update_cache_task())
+
+async def monitor_mysql_connection():
+  """
+  Мониторит соединение с MySQL и пытается восстановить его при необходимости.
+  Эта задача работает в фоне в течение всего времени работы приложения.
+  """
+  check_interval = 30  # Проверяем соединение каждые 30 секунд
+  while True:
+    await asyncio.sleep(check_interval)
+    
+    if not mysql.is_connected():
+      logger.warning("MySQL: Обнаружено отсутствие соединения, попытка переподключения...")
+      try:
+        await mysql.connect()
+        logger.info("MySQL: Соединение успешно восстановлено")
+      except aioConnectionError as e:
+        logger.error(f"MySQL: Не удалось восстановить соединение: {e}")
+    else:
+      # Периодически проверяем работоспособность соединения простым запросом
+      try:
+        await mysql.check_connection()
+      except Exception as e:
+        logger.error(f"MySQL: Ошибка при проверке соединения: {e}")
+
+async def update_cache_task():
+  """
+  Периодически обновляет кеши данных из MySQL.
+  Позволяет работать приложению даже при временных проблемах с соединением.
+  """
+  while True:
+    # Подождем немного, чтобы не обновлять кеш сразу при запуске
+    await asyncio.sleep(5)  
+    
+    if mysql.is_connected():
+      try:
+        # Обновляем кеш ассоциаций Steam ID <-> Discord ID
+        await update_user_associations_cache()
+        
+        # Обновляем кеш списка карт
+        await update_map_list_cache()
+        
+        logger.info("MySQL: Кеши успешно обновлены")
+      except Exception as e:
+        logger.error(f"MySQL: Ошибка при обновлении кешей: {e}")
+    else:
+      logger.warning("MySQL: Нет соединения, пропускаем обновление кешей")
+    
+    # Ждем определенное время перед следующим обновлением
+    await asyncio.sleep(CACHE_UPDATE_INTERVAL)
+
+async def update_user_associations_cache():
+  """
+  Загружает все ассоциации Steam ID <-> Discord ID из базы данных в кеш.
+  """
+  query = "SELECT steam_id, discord_id FROM users"
+  
+  try:
+    response = await mysql.execute_select(query)
+    
+    if response:
+      # Очищаем текущие кеши
+      steam_discord_cache.clear()
+      discord_steam_cache.clear()
+      
+      # Заполняем кеши новыми данными
+      for steam_id, discord_id in response:
+        steam_discord_cache[steam_id] = discord_id
+        discord_steam_cache[discord_id] = steam_id
+      
+      cache_last_update["steam_discord"] = datetime.now()
+      logger.info(f"MySQL: Обновлен кеш ассоциаций пользователей: {len(steam_discord_cache)} записей")
+  except Exception as e:
+    logger.error(f"MySQL: Ошибка при обновлении кеша ассоциаций: {e}")
+
+async def update_map_list_cache():
+  """
+  Загружает список карт из базы данных в кеш.
+  """
+  query = "SELECT map_name, activated FROM maps"
+  
+  try:
+    response = await mysql.execute_select(query)
+    
+    if response:
+      global map_list_cache
+      map_list_cache = response
+      cache_last_update["map_list"] = datetime.now()
+      logger.info(f"MySQL: Обновлен кеш списка карт: {len(map_list_cache)} записей")
+  except Exception as e:
+    logger.error(f"MySQL: Ошибка при обновлении кеша списка карт: {e}")
+
 
 # -- ev_reg
 @observer.subscribe(Event.BC_REG)
@@ -266,35 +382,68 @@ async def ev_member_update(data):
 
 # -- (route) check_user
 @nsroute.create_route("/check_user")
-@require_connection
 async def route_check_user(steam_id):
-  query = "SELECT discord_id FROM users WHERE steam_id = %s"
-  query_values = (steam_id, )
+  # Сначала проверяем кеш
+  if steam_id in steam_discord_cache:
+    return steam_discord_cache[steam_id]
+  
+  # Если в кеше нет, пытаемся получить из базы данных, если соединение активно
+  if mysql.is_connected():
+    query = "SELECT discord_id FROM users WHERE steam_id = %s"
+    query_values = (steam_id, )
 
-  try:
-    response = await mysql.execute_select(query, query_values)
+    try:
+      response = await mysql.execute_select(query, query_values)
 
-    if not response or not response[0]:
-      return None  # Если нет результатов, возвращаем False
+      if not response or not response[0]:
+        return None  # Если нет результатов, возвращаем None
 
-    id = response[0][0]
-
-    return id
-  except QueryError as err:
-    logger.error(f"{err}")
+      discord_id = response[0][0]
+      
+      # Обновляем кеш
+      steam_discord_cache[steam_id] = discord_id
+      discord_steam_cache[discord_id] = steam_id
+      
+      return discord_id
+    except QueryError as err:
+      logger.error(f"{err}")
+  
+  # Если нет соединения или произошла ошибка, возвращаем None
+  return None
 
 # - (route) get_map_list
 @nsroute.create_route("/get_map_list")
-@require_connection
 async def route_get_map_list():
-  query = "SELECT map_name, activated FROM maps"
+  """
+  Возвращает список всех карт из кеша или базы данных.
+  Если кеш пустой и соединение с базой есть - обновляет кеш.
+  """
+  global map_list_cache
+  # Сначала проверяем кеш
+  if map_list_cache:
+    return map_list_cache
+  
+  # Если в кеше пусто, пытаемся получить из базы данных, если соединение активно
+  if mysql.is_connected():
+    query = "SELECT map_name, activated FROM maps"
 
-  try:
-    response = await mysql.execute_select(query)
+    try:
+      response = await mysql.execute_select(query)
 
-    if not response or not response[0]:
-      return None  # Если нет результатов, возвращаем False
+      if not response or not response[0]:
+        return None  # Если нет результатов, возвращаем None
 
-    return response
-  except QueryError as err:
-    logger.error(f"{err}")
+      # Обновляем кеш
+      map_list_cache = response
+      cache_last_update["map_list"] = datetime.now()
+      
+      return response
+    except QueryError as err:
+      logger.error(f"{err}")
+  
+  # Если нет соединения или произошла ошибка, но у нас есть кеш
+  if map_list_cache:
+    logger.warning("MySQL: Используем кешированный список карт из-за проблем с БД")
+    return map_list_cache
+    
+  return None
