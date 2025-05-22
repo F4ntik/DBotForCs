@@ -62,6 +62,7 @@ async def steam_record_exist(user_id: str, steam_id: str):
     return rows != 0
   except QueryError as err:
     logger.error(f"{err}")
+    return False
 
 # -- map_record_exist
 @require_connection
@@ -92,42 +93,27 @@ def check_steam_id(steam_id: str):
 # -- ev_ready
 @observer.subscribe(Event.BE_READY)
 async def ev_ready():
-  try:
-    await mysql.connect()
-    logger.info("MySQL: Успешно подключен")
-    # Запускаем мониторинг соединения с MySQL
-    asyncio.create_task(monitor_mysql_connection())
-    # Запускаем задачу обновления кешей
-    asyncio.create_task(update_cache_task())
-  except aioConnectionError as err:
-    logger.error(f"MySQL: {err}")
-    # Даже в случае ошибки запускаем мониторинг - он попытается переподключиться
-    asyncio.create_task(monitor_mysql_connection())
-    # Также запускаем задачу кеширования - она будет пытаться работать, когда соединение появится
-    asyncio.create_task(update_cache_task())
-
-async def monitor_mysql_connection():
-  """
-  Мониторит соединение с MySQL и пытается восстановить его при необходимости.
-  Эта задача работает в фоне в течение всего времени работы приложения.
-  """
-  check_interval = 30  # Проверяем соединение каждые 30 секунд
-  while True:
-    await asyncio.sleep(check_interval)
-    
-    if not mysql.is_connected():
-      logger.warning("MySQL: Обнаружено отсутствие соединения, попытка переподключения...")
-      try:
-        await mysql.connect()
-        logger.info("MySQL: Соединение успешно восстановлено")
-      except aioConnectionError as e:
-        logger.error(f"MySQL: Не удалось восстановить соединение: {e}")
-    else:
-      # Периодически проверяем работоспособность соединения простым запросом
-      try:
-        await mysql.check_connection()
-      except Exception as e:
-        logger.error(f"MySQL: Ошибка при проверке соединения: {e}")
+    try:
+        # AioMysql.connect() now handles its own monitoring and reconnections.
+        await mysql.connect() 
+        if mysql.is_connected():
+            logger.info("MySQL: Connection established and monitoring started.")
+        else:
+            # This case should ideally be handled by AioMysql's connect retries.
+            # If connect() fails after retries, it will raise ConnectionError.
+            logger.error("MySQL: Failed to connect despite retries. Monitoring will attempt to reconnect.")
+        
+        # The cache update task can still be started here.
+        # It will rely on mysql.is_connected() to determine if it should run.
+        asyncio.create_task(update_cache_task())
+    except aioConnectionError as err: # Ensure this is the correct exception type from asyncsql.py
+        logger.error(f"MySQL: Connection failed on startup: {err}. Background monitoring will attempt to reconnect.")
+        # Still start update_cache_task, as it checks for connection.
+        asyncio.create_task(update_cache_task())
+    except Exception as e:
+        logger.critical(f"MySQL: Unexpected error during initial connection setup: {e}")
+        # Still start update_cache_task
+        asyncio.create_task(update_cache_task())
 
 async def update_cache_task():
   """

@@ -34,6 +34,11 @@ CS_RECONNECT_INTERVAL = 10
 CS_HOST = '127.0.0.1'  # Локальный хост
 CS_RCON_PASSWORD = '12345'  # Пароль для удаленного управления
 
+# IMPORTANT: For stable connections with a connection pool,
+# ensure your MySQL server's `wait_timeout` and `interactive_timeout` variables
+# are set to a sufficiently high value (e.g., several hours) to prevent
+# the server from closing idle connections too quickly.
+# These settings are configured in your MySQL server's configuration file (e.g., my.cnf or my.ini).
 # Настройки подключения к базе данных
 DB_HOST = '127.0.0.1'  # Хост базы данных
 DB_PORT = 3306  # Порт базы данных, по дефолту MySQL = 3306
