@@ -162,6 +162,30 @@ async def cmd_sync_maps(interaction: discord.Interaction):
     Param.Interaction: interaction,
   })
 
+# -- /sync_maps_to_db
+@bot.tree.command(name="sync_maps_to_db", description="Инициирует синхронизацию списка карт с CS сервера в базу данных.")
+@commands.has_permissions(manage_messages=True)
+async def cmd_sync_maps_to_db(interaction: discord.Interaction):
+  await interaction.response.defer(thinking=True, ephemeral=True)
+  try:
+    # Send the RCON command to the CS server
+    await observer.notify(Event.BC_CS_RCON, {
+        Param.Interaction: interaction, # Pass interaction for potential RCON handler follow-up
+        "command": "ultrahc_cs_upload_maps_to_db"
+        # Note: The BC_CS_RCON event handler might send its own followup message.
+        # This command provides a specific confirmation that this particular action was initiated.
+    })
+    # Send a confirmation message to the user
+    await interaction.followup.send("Команда синхронизации карт с сервера в БД отправлена. Проверьте консоль сервера для деталей.", ephemeral=True)
+  except Exception as e:
+    logger.error(f"Error in cmd_sync_maps_to_db: {e}", exc_info=True)
+    # Try to send an error message if the followup hasn't been used yet by RCON handler
+    if not interaction.response.is_done():
+        await interaction.followup.send("Произошла ошибка при отправке команды синхронизации.", ephemeral=True)
+    else: # if RCON handler already responded (possibly with an error, or success)
+        logger.info("cmd_sync_maps_to_db: Interaction already responded to by RCON handler, error not sent to user via this command's followup.")
+
+
 # -- /map_change
 @bot.tree.command(name="map_change", description="Меняет карту")
 @discord.app_commands.describe(map="Название карты")
@@ -228,5 +252,60 @@ async def cmd_map_update(interaction: discord.Interaction, map_name: str, activa
     "max_players": max_players,
     "priority": priority
   })
+
+# -- /list_server_maps
+@bot.tree.command(name="list_server_maps", description="Выводит список карт с сервера из базы данных и их статус активации.")
+@commands.has_permissions(manage_messages=True) # Or other appropriate permissions
+async def cmd_list_server_maps(interaction: discord.Interaction):
+  await interaction.response.defer(thinking=True, ephemeral=True)
+
+  try:
+    # map_list_data is expected to be List[Tuple[str, int]] or None
+    # Example: [('de_dust2', 1), ('cs_office', 0)]
+    map_list_data = await observer.nsroute.call_route("/get_map_list")
+
+    if not map_list_data: # Handles None or empty list
+      await interaction.followup.send("Список карт пуст или не удалось его загрузить.", ephemeral=True)
+      return
+
+    response_lines = ["**Список карт сервера:**"]
+    for map_entry in map_list_data:
+      if isinstance(map_entry, (list, tuple)) and len(map_entry) >= 2:
+        map_name = str(map_entry[0]) # Ensure map_name is a string
+        try:
+            activated = int(map_entry[1]) # Ensure activated is an int
+            status_str = "Активна" if activated == 1 else "Неактивна"
+            response_lines.append(f"- {map_name}: {status_str}")
+        except (ValueError, TypeError):
+            logger.warning(f"cmd_list_server_maps: Invalid activation status for map '{map_name}': {map_entry[1]}")
+            response_lines.append(f"- {map_name}: Статус неизвестен (ошибка данных)")
+      else:
+        logger.warning(f"cmd_list_server_maps: Unexpected map entry format: {map_entry}")
+        # Optionally, add a placeholder for malformed entries if desired
+        # response_lines.append(f"- Некорректные данные для карты: {str(map_entry)[:50]}")
+
+
+    if len(response_lines) <= 1: # If only header is present (or map_list_data was effectively empty)
+        await interaction.followup.send("Список карт содержит некорректные данные или пуст после обработки.", ephemeral=True)
+        return
+        
+    final_response = "\n".join(response_lines)
+    
+    # Discord message length limit is 2000 characters.
+    # If the message is too long, truncate it and add a note.
+    if len(final_response) > 1980: # Using a buffer
+        truncated_response = final_response[:1900] # Truncate to allow space for the note
+        last_newline = truncated_response.rfind('\n') # Try to end on a full line
+        if last_newline != -1:
+            truncated_response = truncated_response[:last_newline]
+        
+        await interaction.followup.send(truncated_response + "\n\n**Примечание: Список был урезан, так как он слишком длинный.**", ephemeral=True)
+        logger.warning("cmd_list_server_maps: Map list was too long and has been truncated.")
+    else:
+        await interaction.followup.send(final_response, ephemeral=True)
+
+  except Exception as e:
+    logger.error(f"Error in cmd_list_server_maps: {e}", exc_info=True)
+    await interaction.followup.send("Произошла ошибка при получении списка карт.", ephemeral=True)
 
 # !SECTION

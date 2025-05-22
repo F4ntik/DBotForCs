@@ -350,6 +350,47 @@ async def ev_map_update(data):
 
   # Обновляем в редис
   await nsroute.call_route("/redis/update_map_list", "update", data['map_name'], data['activated'])
+
+# -- upsert_map_from_server
+async def upsert_map_from_server(map_data: Dict[str, Any]):
+    map_name = map_data['map_name']
+    min_players = map_data['min_players']
+    max_players = map_data['max_players']
+    priority = map_data['priority']
+    activated = map_data['activated'] # Should be 1 from plugin
+
+    exists = await map_record_exist(map_name)
+    if exists is None: # Error during check
+        logger.error(f"MySQL: DB error checking if map {map_name} exists during server sync.")
+        # Raising QueryError to be consistent with other error handling that web handler might expect
+        raise QueryError(f"Failed to check existence for map {map_name}") 
+
+    action: str
+    if exists:
+        query = "UPDATE maps SET min_players = %s, max_players = %s, priority = %s, activated = %s WHERE map_name = %s"
+        query_values = (min_players, max_players, priority, activated, map_name)
+        action = "update"
+    else:
+        query = "INSERT INTO maps (map_name, min_players, max_players, priority, activated) VALUES (%s, %s, %s, %s, %s)"
+        query_values = (map_name, min_players, max_players, priority, activated)
+        action = "add"
+
+    try:
+        rows = await mysql.execute_change(query, query_values)
+        if rows > 0:
+            logger.info(f"MySQL: Successfully {action}d map {map_name} from server sync.")
+            # Update Redis cache
+            # Ensure 'activated' is an int for nsroute if it expects specific types, though it should handle it.
+            await nsroute.call_route("/redis/update_map_list", action, map_name, int(activated))
+            return True # Indicates success
+        else:
+            # This case (0 rows affected) might happen if an UPDATE tried to set values that were already there,
+            # or if the map was deleted between the check and the update.
+            logger.warning(f"MySQL: No rows affected when trying to {action} map {map_name} from server sync. This might be okay if data was identical or map deleted concurrently.")
+            return False # Indicates no change or potential issue
+    except QueryError as err:
+        logger.error(f"MySQL: Failed to {action} map {map_name} from server sync: {err}")
+        raise # Re-raise to be caught by the web handler or calling function
   
 # -- ev_member_update
 @observer.subscribe(Event.BE_MEMBER_UPDATE)

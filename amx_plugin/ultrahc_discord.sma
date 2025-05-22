@@ -29,7 +29,8 @@ enum ECvarsList {
 	_sql_host,
 	_sql_user,
 	_sql_pass,
-	_sql_db
+	_sql_db,
+	_map_upload_url
 }
 
 // U can change it. But be carefully
@@ -63,6 +64,7 @@ public plugin_init() {
 	register_concmd("ultrahc_ds_kick_player", "HookKickPlayerCmd");
 	
 	register_concmd("ultrahc_ds_get_info", "HookGetinfoCmd");
+	register_concmd("ultrahc_cs_upload_maps_to_db", "HookUploadMapsToDB");
 	
 	#if defined _map_manager_core_included
 		register_concmd("ultrahc_ds_reload_map_list", "HookReloadMapList");
@@ -71,6 +73,7 @@ public plugin_init() {
 	
 	bind_pcvar_string(create_cvar("ultrahc_ds_webhook_token", ""), __cvar_str_list[_webhook_token], CVARS_LENGTH);
 	bind_pcvar_string(create_cvar("ultrahc_ds_webhook_url", ""), __cvar_str_list[_webhook_url], CVARS_LENGTH);
+	bind_pcvar_string(create_cvar("ultrahc_ds_map_upload_url", "http://localhost:8000/maps/upload_from_server"), __cvar_str_list[_map_upload_url], CVARS_LENGTH);
 	
 	bind_pcvar_string(create_cvar("ultrahc_ds_sql_host", ""), __cvar_str_list[_sql_host], CVARS_LENGTH);
 	bind_pcvar_string(create_cvar("ultrahc_ds_sql_user", ""), __cvar_str_list[_sql_user], CVARS_LENGTH);
@@ -403,6 +406,11 @@ public HookMsgFromDs() {
 	}
 
 	public SQLHandlerForMapList(failstate, Handle:query, error[], errnum, data[], size, queuetime) {
+		if (SQL_NumResults(query) == 0) {
+			server_print("ULTRAHC_DISCORD: Database returned an empty map list. Skipping overwrite of maps_ultrahc.ini.");
+			return;
+		}
+
 		new file_path[256]; 
 		get_localinfo("amxx_configsdir", file_path, charsmax(file_path));
 		formatex(file_path, charsmax(file_path), "%s/%s", file_path, file_name);
@@ -432,6 +440,126 @@ public HookMsgFromDs() {
 		}
 		
 		fclose(file);
+	}
+
+	public HookUploadMapsToDB() {
+		server_print("ULTRAHC_DISCORD: Initiating map list upload to database...");
+
+		new file_path[256];
+		get_localinfo("amxx_configsdir", file_path, charsmax(file_path));
+		formatex(file_path, charsmax(file_path), "%s/%s", file_path, file_name);
+
+		new file = fopen(file_path, "r");
+		if (!file) {
+			server_print("ULTRAHC_DISCORD: Could not open %s for reading.", file_name);
+			return;
+		}
+
+		new json_payload[8192]; // Increased size for safety
+		new json_len = 0;
+		json_len = formatex(json_payload, charsmax(json_payload), "[");
+		
+		new bool:is_first_map = true;
+		new line[128];
+		new map_name_str[64]; // Max map name length
+		new min_players_str[8];
+		new max_players_str[8];
+		new priority_str[8];
+
+		while (fgets(file, line, charsmax(line))) {
+			trim(line);
+			if (line[0] == EOS || line[0] == ';') { // Skip empty or comment lines
+				continue;
+			}
+
+			// Parsing: map_name min_players max_players priority
+			// Example line: de_dust2 0 24 100
+			// Use strtok to handle potential multiple spaces and ensure robust parsing
+			
+			new temp_line[128];
+			formatex(temp_line, charsmax(temp_line), "%s", line); // strtok modifies the string, so use a copy
+
+			new token[64];
+			new part_count = 0;
+
+			// 1. Map Name
+			strtok(temp_line, token, charsmax(token), ' ');
+			if (token[0] == EOS) continue; // Should not happen if line is not empty
+			formatex(map_name_str, charsmax(map_name_str), "%s", token);
+			part_count++;
+
+			// 2. Min Players
+			strtok(EOS_STRING, token, charsmax(token), ' '); // Pass EOS_STRING to continue tokenizing the same string
+			if (token[0] == EOS) {
+				server_print("ULTRAHC_DISCORD: Malformed line in %s (missing min_players): %s", file_name, line);
+				continue;
+			}
+			formatex(min_players_str, charsmax(min_players_str), "%s", token);
+			part_count++;
+			
+			// 3. Max Players
+			strtok(EOS_STRING, token, charsmax(token), ' ');
+			if (token[0] == EOS) {
+				server_print("ULTRAHC_DISCORD: Malformed line in %s (missing max_players): %s", file_name, line);
+				continue;
+			}
+			formatex(max_players_str, charsmax(max_players_str), "%s", token);
+			part_count++;
+
+			// 4. Priority
+			strtok(EOS_STRING, token, charsmax(token), ' ');
+			if (token[0] == EOS) {
+				server_print("ULTRAHC_DISCORD: Malformed line in %s (missing priority): %s", file_name, line);
+				continue;
+			}
+			formatex(priority_str, charsmax(priority_str), "%s", token);
+			part_count++;
+			
+			// Check if there's more data on the line, which would be an error
+			if (strtok(EOS_STRING, token, charsmax(token), ' ') != 0 && token[0] != EOS) {
+				server_print("ULTRAHC_DISCORD: Malformed line in %s (extra data): %s", file_name, line);
+				continue;
+			}
+
+			new min_players_val = str_to_num(min_players_str);
+			new max_players_val = str_to_num(max_players_str);
+			new priority_val = str_to_num(priority_str);
+
+			if (!is_first_map) {
+				json_len += formatex(json_payload[json_len], charsmax(json_payload) - json_len, ",");
+			}
+			
+			// Ensure map_name_str is properly escaped for JSON, especially quotes.
+			// For simplicity, assuming map names don't contain quotes or backslashes.
+			// If they could, we'd need a replace_string call here for '"' -> '\"' and '\' -> '\\'.
+			
+			json_len += formatex(json_payload[json_len], charsmax(json_payload) - json_len, "{^"map_name^":^"%s^",^"min_players^":%d,^"max_players^":%d,^"priority^":%d,^"activated^":1}",
+				map_name_str, min_players_val, max_players_val, priority_val);
+			
+			is_first_map = false;
+		}
+		fclose(file);
+
+		json_len += formatex(json_payload[json_len], charsmax(json_payload) - json_len, "]");
+
+		if (is_first_map) { // No maps were read, json_payload is "[]"
+			server_print("ULTRAHC_DISCORD: No maps found in %s or file was empty. Sending empty list.", file_name);
+		}
+
+		new EzHttpOptions:options_id = ezhttp_create_options();
+		ezhttp_option_set_header(options_id, "Authorization", __cvar_str_list[_webhook_token]);
+		ezhttp_option_set_header(options_id, "Content-Type", "application/json");
+		ezhttp_option_set_body(options_id, json_payload);
+
+		if (__cvar_str_list[_map_upload_url][0] == EOS) {
+			server_print("ULTRAHC_DISCORD: Map upload URL is not configured (ultrahc_ds_map_upload_url). Cannot send map list.");
+			ezhttp_destroy_options(options_id);
+			return;
+		}
+		
+		server_print("ULTRAHC_DISCORD: Sending map list to %s", __cvar_str_list[_map_upload_url]);
+		ezhttp_post(__cvar_str_list[_map_upload_url], "HTTPComplete", options_id);
+		// ezhttp_destroy_options(options_id) is called by ezhttp_post on success or failure if option is set
 	}
 
 #endif
