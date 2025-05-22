@@ -1,0 +1,7 @@
+pytest
+cachetools
+redis
+discord
+aiohttp
+aiomysql
+pytest-aiohttp
