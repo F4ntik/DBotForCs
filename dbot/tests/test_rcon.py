@@ -6,22 +6,25 @@ import asyncio # Required for @pytest.mark.asyncio if not using pytest-asyncio p
 # unittest import removed.
 
 from rehlds.rcon import RCON, BadRCONPassword, BadConnection, NoConnection, ServerOffline # Import necessary exceptions
+from dbot.tests import tests_config # Import the test configuration
 
-# RCON server configuration (consider making these environment variables or configurable)
-RCON_HOST = '127.0.0.1'
-RCON_PORT = 27015
-RCON_PASSWORD = '12345' # Replace with your actual RCON password for testing
+# RCON server configuration parameters are now sourced from tests_config
 
 @pytest.fixture
 async def rcon_client(): # Fixture can be async to align with async tests, though RCON ops are sync
     """
     Pytest fixture to set up and tear down an RCON connection.
+    Uses configurations from dbot.tests.tests_config.
     """
-    rcon = RCON(host=RCON_HOST, port=RCON_PORT, password=RCON_PASSWORD)
+    rcon = RCON(
+        host=tests_config.RCON_HOST,
+        port=tests_config.RCON_PORT,
+        password=tests_config.RCON_PASSWORD
+    )
     try:
         rcon.connect() # Synchronous connect
     except (BadRCONPassword, BadConnection, ServerOffline, ConnectionRefusedError) as e: # Catch specific connection errors
-        pytest.fail(f"Failed to connect to RCON server at {RCON_HOST}:{RCON_PORT}: {e}. Ensure server is running and password is correct.")
+        pytest.fail(f"Failed to connect to RCON server at {tests_config.RCON_HOST}:{tests_config.RCON_PORT}: {e}. Ensure server is running and password is correct.")
         return None # Should not be reached due to pytest.fail
         
     yield rcon  # Provide the connected rcon instance to the test
