@@ -5,20 +5,23 @@ import asyncio # Keep asyncio for @pytest.mark.asyncio
 
 # Corrected import for AioMysql and QueryError
 from data_server.asyncsql import AioMysql, QueryError, ConnectionError as AioMysqlConnectionError
+from dbot.tests import tests_config # Import the test configuration
 
-# Database connection parameters (consider making these configurable if needed)
-DB_HOST = '127.0.0.1'
-DB_PORT = 3306
-DB_USER = 'root'
-DB_PASSWORD = ''
-DB_NAME = 'mysql_test' # Ensure this database exists for testing
+# Database connection parameters are now sourced from tests_config
 
 @pytest.fixture
 async def db_connection():
     """
     Pytest fixture to set up and tear down a database connection.
+    Uses configurations from dbot.tests.tests_config.
     """
-    db = AioMysql(host=DB_HOST, port=DB_PORT, user=DB_USER, password=DB_PASSWORD, db=DB_NAME)
+    db = AioMysql(
+        host=tests_config.MYSQL_HOST,
+        port=tests_config.MYSQL_PORT,
+        user=tests_config.MYSQL_USER,
+        password=tests_config.MYSQL_PASSWORD,
+        db=tests_config.MYSQL_DB
+    )
     try:
         await db.connect()
     except AioMysqlConnectionError as e:
